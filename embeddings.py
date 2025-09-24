@@ -1,6 +1,6 @@
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Pinecone
+from langchain_pinecone import PineconeVectorStore
 from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone as PineconeClient, ServerlessSpec
 from typing import Optional, List
@@ -104,7 +104,7 @@ def init_pinecone() -> PineconeClient:
         logger.error(f"Failed to initialize Pinecone: {str(e)}")
         raise
 
-def create_embeddings(index_name: str = "mental-health-chatbot") -> Pinecone:
+def create_embeddings(index_name: str = "mental-health-chatbot") -> PineconeVectorStore:
     """
     Create embeddings from the mental health manual PDF and store them in Pinecone.
     
@@ -112,7 +112,7 @@ def create_embeddings(index_name: str = "mental-health-chatbot") -> Pinecone:
         index_name (str): Name of the Pinecone index to create
         
     Returns:
-        Pinecone: The vector store for similarity search
+        PineconeVectorStore: The vector store for similarity search
     """
     try:
         # Initialize Pinecone
@@ -129,7 +129,7 @@ def create_embeddings(index_name: str = "mental-health-chatbot") -> Pinecone:
                 metric="cosine",
                 spec=ServerlessSpec(
                     cloud="aws",
-                    region="us-east-1"  # Changed to us-east-1 for better availability
+                    region="us-east-1"
                 )
             )
             logger.info(f"Created new Pinecone index: {index_name}")
@@ -166,8 +166,8 @@ def create_embeddings(index_name: str = "mental-health-chatbot") -> Pinecone:
         # Initialize embeddings
         embeddings = SentenceTransformerEmbeddings("all-MiniLM-L6-v2")
         
-        # Create the vector store in Pinecone
-        vector_store = Pinecone.from_documents(
+        # Create the vector store in Pinecone (v3 SDK compatible)
+        vector_store = PineconeVectorStore.from_documents(
             documents=texts,
             embedding=embeddings,
             index_name=index_name
@@ -180,7 +180,7 @@ def create_embeddings(index_name: str = "mental-health-chatbot") -> Pinecone:
         logger.error(f"Failed to create embeddings: {str(e)}")
         raise
 
-def load_embeddings(index_name: str = "mental-health-chatbot") -> Optional[Pinecone]:
+def load_embeddings(index_name: str = "mental-health-chatbot") -> Optional[PineconeVectorStore]:
     """
     Load the embeddings from Pinecone.
     
@@ -188,7 +188,7 @@ def load_embeddings(index_name: str = "mental-health-chatbot") -> Optional[Pinec
         index_name (str): Name of the Pinecone index to load
         
     Returns:
-        Optional[Pinecone]: The vector store for similarity search
+        Optional[PineconeVectorStore]: The vector store for similarity search
     """
     try:
         # Initialize Pinecone
@@ -203,8 +203,8 @@ def load_embeddings(index_name: str = "mental-health-chatbot") -> Optional[Pinec
         # Create embeddings model
         embeddings = SentenceTransformerEmbeddings("all-MiniLM-L6-v2")
         
-        # Load the existing index
-        vector_store = Pinecone.from_existing_index(
+        # Load the existing index (v3 SDK compatible)
+        vector_store = PineconeVectorStore.from_existing_index(
             index_name=index_name,
             embedding=embeddings
         )
@@ -216,13 +216,13 @@ def load_embeddings(index_name: str = "mental-health-chatbot") -> Optional[Pinec
         logger.error(f"Failed to load embeddings: {str(e)}")
         raise
 
-def get_similar_docs(query: str, vector_store: Pinecone, k: int = 3) -> list:
+def get_similar_docs(query: str, vector_store: PineconeVectorStore, k: int = 3) -> list:
     """
     Search for similar documents in the vector store based on the query.
     
     Args:
         query (str): The search query
-        vector_store (Pinecone): The vector store to search in
+        vector_store (PineconeVectorStore): The vector store to search in
         k (int): Number of similar documents to retrieve
         
     Returns:
