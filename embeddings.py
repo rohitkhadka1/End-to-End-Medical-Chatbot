@@ -2,13 +2,13 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_pinecone import PineconeVectorStore
 from sentence_transformers import SentenceTransformer
-from pinecone import Pinecone as PineconeClient, ServerlessSpec
 from typing import Optional, List
 import os
 import logging
 import time
 import numpy as np
 from dotenv import load_dotenv
+from pinecone import Pinecone as PineconeClient, ServerlessSpec
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -85,24 +85,70 @@ class SentenceTransformerEmbeddings:
             logger.error(f"Failed to embed query: {str(e)}")
             raise
 
-def init_pinecone() -> PineconeClient:
-    """
-    Initialize Pinecone client with API key from .env file.
-    Returns:
-        PineconeClient: Initialized Pinecone client
-    """
+def _require_pinecone_env() -> None:
+    """Ensure Pinecone API key exists in environment for langchain-pinecone to use."""
+    api_key = os.getenv('PINECONE_API_KEY')
+    if not api_key:
+        raise ValueError("PINECONE_API_KEY must be set in .env file")
+
+def _ensure_index_exists(index_name: str, dimension: int) -> None:
+    """Create the Pinecone index if it does not already exist (v3 client)."""
+    api_key = os.getenv('PINECONE_API_KEY')
+    region = os.getenv('PINECONE_REGION', 'us-east-1')
+    pc = PineconeClient(api_key=api_key)
+    
+    # Get list of indexes - handle different API response formats
     try:
-        api_key = os.getenv('PINECONE_API_KEY')
-        if not api_key:
-            raise ValueError("PINECONE_API_KEY must be set in .env file")
-            
-        pc = PineconeClient(api_key=api_key)
-        logger.info("Pinecone initialized successfully")
-        return pc
-        
+        indexes_response = pc.list_indexes()
+        # Handle both old and new API formats
+        if hasattr(indexes_response, 'indexes'):
+            # New API format
+            existing = [idx.name for idx in indexes_response.indexes]
+        elif isinstance(indexes_response, list):
+            # Handle list of index objects
+            existing = [idx.name if hasattr(idx, 'name') else str(idx) for idx in indexes_response]
+        else:
+            # Handle direct list of strings
+            existing = [str(idx) for idx in indexes_response]
     except Exception as e:
-        logger.error(f"Failed to initialize Pinecone: {str(e)}")
-        raise
+        logger.error(f"Error listing indexes: {e}")
+        existing = []
+    
+    logger.info(f"Checking if index '{index_name}' exists...")
+    logger.info(f"Existing indexes: {existing}")
+    
+    if index_name not in existing:
+        logger.info(f"Creating new Pinecone index '{index_name}' with dimension {dimension}")
+        pc.create_index(
+            name=index_name,
+            dimension=dimension,
+            metric="cosine",
+            spec=ServerlessSpec(cloud="aws", region=region)
+        )
+        logger.info(f"Created Pinecone index '{index_name}' in region '{region}'")
+        
+        # wait for ready
+        max_wait_time = 60  # Maximum wait time in seconds
+        wait_time = 0
+        while wait_time < max_wait_time:
+            try:
+                status = pc.describe_index(index_name).status
+                if status.get('ready', False):
+                    logger.info(f"Index '{index_name}' is ready!")
+                    break
+                else:
+                    logger.info(f"Waiting for index to be ready... ({wait_time}s)")
+                    time.sleep(5)
+                    wait_time += 5
+            except Exception as e:
+                logger.warning(f"Error checking index status: {e}")
+                time.sleep(5)
+                wait_time += 5
+        
+        if wait_time >= max_wait_time:
+            logger.warning(f"Index creation timeout after {max_wait_time}s")
+    else:
+        logger.info(f"Index '{index_name}' already exists")
 
 def create_embeddings(index_name: str = "mental-health-chatbot") -> PineconeVectorStore:
     """
@@ -115,30 +161,9 @@ def create_embeddings(index_name: str = "mental-health-chatbot") -> PineconeVect
         PineconeVectorStore: The vector store for similarity search
     """
     try:
-        # Initialize Pinecone
-        pc = init_pinecone()
-        
-        # Create Pinecone index if it doesn't exist
-        dimension = 384  # dimension for 'all-MiniLM-L6-v2' model
-        existing_indexes = [index.name for index in pc.list_indexes()]
-        
-        if index_name not in existing_indexes:
-            pc.create_index(
-                name=index_name,
-                dimension=dimension,
-                metric="cosine",
-                spec=ServerlessSpec(
-                    cloud="aws",
-                    region="us-east-1"
-                )
-            )
-            logger.info(f"Created new Pinecone index: {index_name}")
-            
-            # Wait for index to be ready
-            while not pc.describe_index(index_name).status['ready']:
-                logger.info("Waiting for index to be ready...")
-                time.sleep(1)
-        
+        # Ensure Pinecone credentials are available; langchain-pinecone will handle client and index creation
+        _require_pinecone_env()
+
         # Check if PDF file exists
         pdf_path = os.path.join('src', 'a-manual-of-mental-health-care-in-general-practice.pdf')
         if not os.path.exists(pdf_path):
@@ -165,13 +190,25 @@ def create_embeddings(index_name: str = "mental-health-chatbot") -> PineconeVect
 
         # Initialize embeddings
         embeddings = SentenceTransformerEmbeddings("all-MiniLM-L6-v2")
-        
-        # Create the vector store in Pinecone (v3 SDK compatible)
-        vector_store = PineconeVectorStore.from_documents(
-            documents=texts,
-            embedding=embeddings,
-            index_name=index_name
-        )
+
+        # Ensure index exists before upserting
+        try:
+            _ensure_index_exists(index_name=index_name, dimension=384)
+        except Exception as e:
+            logger.error(f"Failed to ensure index exists: {str(e)}")
+            raise
+
+        # Create the vector store in Pinecone by upserting all chunks.
+        try:
+            logger.info(f"Creating vector store with {len(texts)} document chunks...")
+            vector_store = PineconeVectorStore.from_documents(
+                documents=texts,
+                embedding=embeddings,
+                index_name=index_name
+            )
+        except Exception as e:
+            logger.error(f"Failed to create vector store: {str(e)}")
+            raise
         
         logger.info(f"Successfully created embeddings in Pinecone index: {index_name}")
         return vector_store
@@ -191,29 +228,26 @@ def load_embeddings(index_name: str = "mental-health-chatbot") -> Optional[Pinec
         Optional[PineconeVectorStore]: The vector store for similarity search
     """
     try:
-        # Initialize Pinecone
-        pc = init_pinecone()
-        
-        # Check if index exists
-        existing_indexes = [index.name for index in pc.list_indexes()]
-        if index_name not in existing_indexes:
-            logger.warning(f"Pinecone index {index_name} does not exist. Creating new embeddings...")
-            return create_embeddings(index_name)
-            
+        _require_pinecone_env()
+
         # Create embeddings model
         embeddings = SentenceTransformerEmbeddings("all-MiniLM-L6-v2")
-        
-        # Load the existing index (v3 SDK compatible)
-        vector_store = PineconeVectorStore.from_existing_index(
-            index_name=index_name,
-            embedding=embeddings
-        )
-        
-        logger.info(f"Successfully loaded embeddings from Pinecone index: {index_name}")
-        return vector_store
-        
+
+        try:
+            # Ensure index exists before loading
+            _ensure_index_exists(index_name=index_name, dimension=384)
+            vector_store = PineconeVectorStore.from_existing_index(
+                index_name=index_name,
+                embedding=embeddings
+            )
+            logger.info(f"Successfully loaded embeddings from Pinecone index: {index_name}")
+            return vector_store
+        except Exception as load_err:
+            logger.warning(f"Could not load existing Pinecone index '{index_name}': {load_err}. Creating embeddings...")
+            return create_embeddings(index_name)
+
     except Exception as e:
-        logger.error(f"Failed to load embeddings: {str(e)}")
+        logger.error(f"Failed to load or create embeddings: {str(e)}")
         raise
 
 def get_similar_docs(query: str, vector_store: PineconeVectorStore, k: int = 3) -> list:

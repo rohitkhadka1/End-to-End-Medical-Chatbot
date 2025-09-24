@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Changed to DEBUG for more detailed logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ load_dotenv()
 
 def validate_environment() -> None:
     """Validate required environment variables are set."""
-    required_vars = ['OPENAI_API_KEY', 'PINECONE_API_KEY']
+    required_vars = ['HUGGINGFACEHUB_API_TOKEN', 'PINECONE_API_KEY']
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     
     if missing_vars:
@@ -32,9 +32,9 @@ def validate_environment() -> None:
 # Initialize Flask app
 app = Flask(__name__)
 
-# Load vector store and conversation chain
-vector_store = load_embeddings()
-conversation = get_conversation_chain()
+# Placeholders for services; initialized at runtime
+vector_store = None
+chain = None
 
 @app.route('/')
 def home():
@@ -45,6 +45,24 @@ def home():
 def chat():
     """Handle chat messages and return streaming AI responses."""
     try:
+        global vector_store, chain
+        # Lazy init in case app is run under a WSGI server that skips __main__
+        if vector_store is None or chain is None:
+            logger.info("Services not initialized yet. Initializing lazily...")
+            validate_environment()
+            if vector_store is None:
+                vector_store = load_embeddings()
+            if chain is None:
+                chain = get_conversation_chain()
+            logger.info("Lazy initialization complete.")
+            # Validate successful initialization
+            if vector_store is None or chain is None:
+                logger.error("Initialization failed: vector_store or chain is None")
+                raise ChatbotError(
+                    "Service initialization failed",
+                    "INIT_ERROR",
+                    {"vector_store_initialized": vector_store is not None, "chain_initialized": chain is not None}
+                )
         # Get user input from request
         user_input = request.json.get('message', '')
         logger.info(f"Received chat request: {user_input[:50]}...")
@@ -58,8 +76,16 @@ def chat():
         
         # Get similar documents from vector store
         try:
+            logger.info(f"Searching for similar documents for query: '{sanitized_input[:50]}...'")
             similar_docs = vector_store.similarity_search(sanitized_input, k=3)
-            logger.debug(f"Found {len(similar_docs)} similar documents")
+            logger.info(f"Found {len(similar_docs)} similar documents")
+            
+            if similar_docs:
+                for i, doc in enumerate(similar_docs):
+                    logger.debug(f"Similar doc {i+1}: {doc.page_content[:100]}...")
+            else:
+                logger.warning("No similar documents found in vector store")
+                
         except Exception as e:
             logger.error(f"Error during similarity search: {str(e)}")
             raise ChatbotError("Failed to search knowledge base", "SEARCH_ERROR", {"error": str(e)})
@@ -67,7 +93,7 @@ def chat():
         # Set up streaming response
         def generate():
             try:
-                for chunk in format_response(similar_docs, sanitized_input, conversation):
+                for chunk in format_response(similar_docs, sanitized_input, chain):
                     yield chunk
             except Exception as e:
                 logger.error(f"Error during response generation: {str(e)}")
@@ -99,8 +125,15 @@ if __name__ == '__main__':
         # Initialize services
         logger.info("Initializing services...")
         vector_store = load_embeddings()
-        conversation = get_conversation_chain()
+        chain = get_conversation_chain()
         logger.info("Services initialized successfully")
+        # Validate successful initialization at startup
+        if vector_store is None or chain is None:
+            raise ChatbotError(
+                "Service initialization failed at startup",
+                "INIT_ERROR",
+                {"vector_store_initialized": vector_store is not None, "chain_initialized": chain is not None}
+            )
         
         # Run the Flask app
         app.run(debug=True, host='0.0.0.0', port=5000)

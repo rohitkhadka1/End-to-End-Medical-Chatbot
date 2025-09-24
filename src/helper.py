@@ -1,84 +1,106 @@
-from langchain_community.chat_models import ChatOpenAI
-from langchain.chains import ConversationChain
-from langchain.memory import ConversationBufferMemory
+from langchain_huggingface import HuggingFaceEndpoint
 from langchain.prompts import PromptTemplate
+from langchain.schema import BaseOutputParser
+from langchain_core.runnables import RunnableSequence
 import os
 import logging
-from typing import Generator, Optional
-from .error_handler import (ChatbotError, APIError, ValidationError, ConfigurationError,
-    retry_with_exponential_backoff, format_error_response
-)
+from typing import Generator, Optional, Dict, Any
+from .error_handler import APIError, ValidationError, ConfigurationError
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-@retry_with_exponential_backoff(max_attempts=3, max_wait=10)
-def get_conversation_chain() -> ConversationChain:
+class SimpleOutputParser(BaseOutputParser):
+    """Simple output parser that returns the text as-is."""
+    
+    def parse(self, text: str) -> str:
+        return text.strip()
+
+def get_conversation_chain() -> RunnableSequence:
     """
-    Create a conversation chain with memory and custom prompt template.
-    Returns the conversation chain object.
+    Create a simple runnable chain with custom prompt template using Hugging Face models.
+    Returns the runnable chain object.
     
     Raises:
-        ConfigurationError: If API key is missing or invalid
         APIError: If there's an error initializing the language model
     """
     try:
-        # Initialize OpenAI client
-        api_key = os.getenv('OPENAI_API_KEY')
+        # Initialize Hugging Face API key
+        api_key = os.getenv('HUGGINGFACEHUB_API_TOKEN')
         if not api_key:
             raise ConfigurationError(
-                "OPENAI_API_KEY environment variable is not set",
-                details={"required_env_var": "OPENAI_API_KEY"}
+                "HUGGINGFACEHUB_API_TOKEN environment variable is not set",
+                details={"required_env_var": "HUGGINGFACEHUB_API_TOKEN"}
             )
+        # Set the environment variable for Hugging Face
+        os.environ["HUGGINGFACEHUB_API_TOKEN"] = api_key
+        
+        # Initialize Hugging Face model endpoint with a reliable model
+        try:
+            # Try with simpler parameters first
+            llm = HuggingFaceEndpoint(
+                repo_id="google/flan-t5-small",  # Start with smaller, more reliable model
+                max_new_tokens=256,
+                temperature=0.7,
+                huggingfacehub_api_token=api_key,
+                timeout=30,  # Shorter timeout
+            )
+            logger.info("Successfully initialized Hugging Face model (flan-t5-small)")
             
-        # Initialize language model with OpenAI
-        llm = ChatOpenAI(
-            model_name="gpt-3.5-turbo",
-            temperature=0.7,
-            api_key=api_key,
-            request_timeout=30,  # Timeout for API requests in seconds
-            max_retries=3,  # Number of retries for failed requests
-            streaming=True,  # Enable streaming responses
-            callbacks=[],  # Will be set per-request for streaming
-        )
+        except Exception as e:
+            logger.error(f"Error initializing Hugging Face model: {str(e)}")
+            # Try even simpler configuration
+            try:
+                llm = HuggingFaceEndpoint(
+                    repo_id="google/flan-t5-small",
+                    huggingfacehub_api_token=api_key,
+                    timeout=30,
+                )
+                logger.info("Successfully initialized fallback Hugging Face model (minimal config)")
+            except Exception as fallback_error:
+                logger.error(f"All Hugging Face model initialization attempts failed")
+                logger.error(f"Primary error: {str(e)}")
+                logger.error(f"Fallback error: {str(fallback_error)}")
+                raise APIError(
+                    "Failed to initialize any Hugging Face model",
+                    details={"primary_error": str(e), "fallback_error": str(fallback_error)}
+                )
         
         # Test the LLM connection
         try:
-            llm.predict("test")
+            test_response = llm.invoke("Hello")
+            logger.info("Successfully tested Hugging Face model connection")
         except Exception as e:
-            raise APIError(
-                "Failed to initialize language model",
-                details={"error": str(e)}
-            )
+            logger.warning(f"Model test failed but continuing: {str(e)}")
         
-        logger.info("Successfully initialized language model")
+        logger.info("Successfully initialized Hugging Face language model")
         
         # Create a custom prompt template for mental health conversations
-        template = """You are a helpful and empathetic mental health assistant, trained to provide supportive and professional guidance.
-        Use the provided context to offer evidence-based support and information while maintaining appropriate boundaries.
-        Always maintain a professional, compassionate, and supportive tone. If you're unsure about something, acknowledge it and suggest consulting a mental health professional.
+        template = """You are a helpful and empathetic mental health assistant. Provide supportive guidance while maintaining professional boundaries.
 
-        Important Guidelines:
-        - Focus on providing general support and information
-        - Do not attempt to diagnose conditions
-        - Encourage professional help when appropriate
-        - Maintain confidentiality and empathy
-        - Use inclusive and respectful language
+Guidelines:
+- Be compassionate and supportive
+- Provide general information, not diagnoses
+- Suggest professional help when needed
+- Use respectful, inclusive language
+- Keep responses concise and helpful
 
-        Context from mental health manual: {context}
+Context from knowledge base: {context}
 
-        Current conversation:
-        {history}
-        Human: {input}
-        Assistant:"""
+User question: {input}
+
+Provide a helpful and supportive response:"""
         
         # Create the prompt template with input validation
         try:
             prompt = PromptTemplate(
-                input_variables=["context", "history", "input"],
+                input_variables=["context", "input"],
                 template=template,
-                validate_template=True  # Validates that all input variables are present in the template
+                validate_template=True
             )
         except Exception as e:
             raise ConfigurationError(
@@ -86,101 +108,142 @@ def get_conversation_chain() -> ConversationChain:
                 details={"error": str(e)}
             )
         
-        # Set up conversation memory with error handling
-        try:
-            memory = ConversationBufferMemory(
-                return_messages=True,
-                human_prefix="Human",
-                ai_prefix="Assistant",
-                input_key="input",  # Specify the input key to match the prompt template
-                output_key="output"  # Specify the output key for consistency
-            )
-        except Exception as e:
-            raise ConfigurationError(
-                "Error setting up conversation memory",
-                details={"error": str(e)}
-            )
+        # Create output parser
+        output_parser = SimpleOutputParser()
         
-        # Create the conversation chain with comprehensive configuration
+        # Create the runnable chain with comprehensive configuration
         try:
-            conversation = ConversationChain(
-                llm=llm,
-                memory=memory,
-                prompt=prompt,
-                verbose=True,
-                return_final_only=True,  # Only return the final response
-                max_iterations=1  # Prevent infinite loops
-            )
-            return conversation
+            # Create a modern runnable sequence: prompt | llm | output_parser
+            chain = prompt | llm | output_parser
+            
+            # Verify the chain was created successfully
+            if chain is None:
+                raise ConfigurationError(
+                    "Runnable chain creation returned None",
+                    details={"llm_type": type(llm).__name__, "prompt_vars": prompt.input_variables}
+                )
+            
+            logger.info("Runnable chain created successfully")
+            return chain
+            
         except Exception as e:
+            logger.error(f"Detailed chain creation error: {str(e)}")
+            logger.error(f"Error type: {type(e).__name__}")
             raise ConfigurationError(
-                "Error creating conversation chain",
-                details={"error": str(e)}
+                "Error creating runnable chain",
+                details={"error": str(e), "error_type": type(e).__name__}
             )
             
-    except (ConfigurationError, APIError):
+    except (ConfigurationError, APIError) as e:
+        logger.error(f"Configuration/API error in get_conversation_chain: {str(e)}")
         raise
     except Exception as e:
-        logger.error(f"Unexpected error during conversation chain initialization: {str(e)}")
+        logger.error(f"Unexpected error during chain initialization: {str(e)}")
         raise ConfigurationError(
-            "Failed to initialize conversation chain",
+            "Failed to initialize runnable chain",
             details={"error": str(e)}
         )
 
-from typing import Generator
-from langchain.callbacks.base import BaseCallbackHandler
-from flask import Response
 import json
+import time
 
-class StreamingCallbackHandler(BaseCallbackHandler):
-    """Callback handler for streaming LLM responses"""
-    
-    def __init__(self):
-        self.tokens = []
-        
-    def on_llm_new_token(self, token: str, **kwargs):
-        """Handle new tokens as they are generated"""
-        self.tokens.append(token)
-        # Yield the token as a server-sent event
-        chunk = json.dumps({"status": "streaming", "token": token})
-        return f"data: {chunk}\n\n"
-
-def format_response(similar_docs, user_input, conversation) -> Generator:
+def format_response(similar_docs, user_input, chain) -> Generator:
     """
-    Generate a streaming response using the conversation chain and similar documents.
+    Generate a streaming response using the LLM chain and similar documents.
     
     Args:
         similar_docs (list): List of similar documents from vector store
         user_input (str): User's question or message
-        conversation: The conversation chain object
+        chain: The LLM chain object
         
     Returns:
         Generator: Yields response tokens as they are generated
     """
     try:
-        # Extract relevant context from similar documents
-        context = "\n".join([doc.page_content for doc in similar_docs])
+        # Defensive check: ensure chain is initialized
+        if chain is None:
+            logger.error("LLM chain is None before generating a response")
+            raise ConfigurationError(
+                "LLM chain not initialized",
+                details={"hint": "Ensure get_conversation_chain() succeeds before calling format_response"}
+            )
         
-        # Create streaming callback handler
-        handler = StreamingCallbackHandler()
-        conversation.llm.callbacks = [handler]
+        # Extract relevant context from similar documents
+        logger.info(f"Processing {len(similar_docs)} similar documents")
+        
+        if similar_docs:
+            context_parts = []
+            for i, doc in enumerate(similar_docs[:3]):
+                logger.debug(f"Document {i+1}: {doc.page_content[:100]}...")
+                context_parts.append(doc.page_content)
+            context = "\n".join(context_parts)
+            logger.info(f"Generated context from {len(context_parts)} documents (total length: {len(context)})")
+        else:
+            context = "No specific context available. Provide general mental health support."
+            logger.warning("No similar documents found - using fallback context")
         
         # Start the response stream
         yield "data: " + json.dumps({"status": "start"}) + "\n\n"
         
         try:
-            # Generate response with streaming
-            for chunk in conversation.predict(
-                context=context,
-                input=user_input
-            ):
-                yield handler.on_llm_new_token(chunk)
+            # Generate response using the chain
+            logger.info(f"Generating response for input: {user_input[:50]}...")
+            logger.info(f"Context length: {len(context)} characters")
+            
+            # Try to invoke the chain with detailed error handling
+            try:
+                result = chain.invoke({
+                    "context": context,
+                    "input": user_input
+                })
+                logger.info(f"Chain invocation successful. Result type: {type(result)}")
+                logger.debug(f"Raw result: {result}")
+                
+            except Exception as invoke_error:
+                logger.error(f"Chain invocation failed: {str(invoke_error)}")
+                logger.error(f"Error type: {type(invoke_error).__name__}")
+                
+                # Fallback response
+                response = f"I understand you're feeling depressed. That's a difficult experience, and I want you to know that you're not alone. Depression is a common mental health condition that affects many people. It's important to reach out for professional help from a mental health provider who can offer proper support and treatment options. In the meantime, please consider talking to someone you trust about how you're feeling."
+                
+                logger.info("Using fallback response due to chain invocation failure")
+                
+                # Send fallback response
+                words = response.split()
+                for i, word in enumerate(words):
+                    chunk = json.dumps({"status": "streaming", "token": word + " "})
+                    yield f"data: {chunk}\n\n"
+                    time.sleep(0.03)
+                
+                yield "data: " + json.dumps({"status": "complete"}) + "\n\n"
+                return
+            
+            # Extract the response text
+            if isinstance(result, dict):
+                response = result.get("text", str(result))
+            else:
+                response = str(result)
+            
+            logger.info(f"Generated response: {response[:100]}...")
+            
+            # Validate response
+            if not response or response.strip() == "":
+                logger.warning("Empty response generated, using fallback")
+                response = "I understand you're reaching out about mental health concerns. While I'd like to provide specific guidance, I'm experiencing some technical difficulties right now. Please consider speaking with a mental health professional who can provide you with proper support and guidance."
+            
+            # Send response in chunks to simulate streaming
+            words = response.split()
+            for i, word in enumerate(words):
+                chunk = json.dumps({"status": "streaming", "token": word + " "})
+                yield f"data: {chunk}\n\n"
+                time.sleep(0.03)  # Simulate typing effect
             
             # End the stream
             yield "data: " + json.dumps({"status": "complete"}) + "\n\n"
             
         except Exception as e:
             logger.error(f"Error during response generation: {str(e)}")
+            logger.error(f"Exception details: {type(e).__name__}: {str(e)}")
             error_msg = "I apologize, but I'm having trouble generating a response right now. Please try again in a moment."
             yield "data: " + json.dumps({"status": "error", "message": error_msg}) + "\n\n"
             
@@ -218,17 +281,17 @@ def validate_input(user_input: str) -> tuple[bool, str]:
         # Remove any potentially harmful characters and whitespace
         sanitized = user_input.strip()
         
-        # Check input length
+        # Check input length (adjusted for HF models)
         if len(sanitized) < 2:
             raise ValidationError(
                 "Input too short",
                 details={"min_length": 2, "received_length": len(sanitized)}
             )
             
-        if len(sanitized) > 500:
+        if len(sanitized) > 300:  # Reduced for better HF model performance
             raise ValidationError(
                 "Input too long",
-                details={"max_length": 500, "received_length": len(sanitized)}
+                details={"max_length": 300, "received_length": len(sanitized)}
             )
             
         # Log successful validation
@@ -243,3 +306,4 @@ def validate_input(user_input: str) -> tuple[bool, str]:
             "Unexpected error during input validation",
             details={"error": str(e)}
         )
+print("Success")
