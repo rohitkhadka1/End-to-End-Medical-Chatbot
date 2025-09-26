@@ -51,10 +51,25 @@ class VoiceService:
         # Initialize ElevenLabs client if API key is available
         if self.elevenlabs_api_key:
             try:
-                self.elevenlabs_client = ElevenLabs(api_key=self.elevenlabs_api_key)
-                logger.info("ElevenLabs client initialized successfully")
+                # Try different initialization methods for different versions
+                try:
+                    # Method 1: Direct client initialization
+                    self.elevenlabs_client = ElevenLabs(api_key=self.elevenlabs_api_key)
+                    logger.info("ElevenLabs client initialized successfully (direct)")
+                except Exception as direct_error:
+                    try:
+                        # Method 2: Import and initialize differently
+                        from elevenlabs.client import ElevenLabs as ElevenLabsClient
+                        self.elevenlabs_client = ElevenLabsClient(api_key=self.elevenlabs_api_key)
+                        logger.info("ElevenLabs client initialized successfully (client)")
+                    except Exception as client_error:
+                        # Method 3: Store API key for direct API calls
+                        self.elevenlabs_client = None
+                        logger.info("ElevenLabs will use direct API calls")
+                        
             except Exception as e:
                 logger.warning(f"Failed to initialize ElevenLabs client: {e}")
+                self.elevenlabs_client = None
     
     def text_to_speech_gtts(self, text: str, output_filepath: Optional[str] = None, autoplay: bool = False) -> str:
         """
@@ -117,7 +132,7 @@ class VoiceService:
             ConfigurationError: If ElevenLabs API key is not configured
             APIError: If TTS generation fails
         """
-        if not self.elevenlabs_client:
+        if not self.elevenlabs_api_key:
             raise ConfigurationError("ElevenLabs API key not configured")
         
         try:
@@ -127,16 +142,32 @@ class VoiceService:
                 output_filepath = temp_file.name
                 temp_file.close()
             
-            # Generate audio
-            audio = self.elevenlabs_client.generate(
-                text=text,
-                voice=voice,
-                output_format="mp3_22050_32",
-                model="eleven_turbo_v2"
-            )
+            # Use direct API approach (most reliable)
+            import requests
             
-            # Save the audio file
-            elevenlabs.save(audio, output_filepath)
+            voice_id = voice if isinstance(voice, str) else "21m00Tcm4TlvDq8ikWAM"  # Rachel voice
+            
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+            headers = {
+                "Accept": "audio/mpeg",
+                "Content-Type": "application/json",
+                "xi-api-key": self.elevenlabs_api_key
+            }
+            data = {
+                "text": text,
+                "model_id": "eleven_turbo_v2",
+                "voice_settings": {
+                    "stability": 0.5,
+                    "similarity_boost": 0.5
+                }
+            }
+            
+            response = requests.post(url, json=data, headers=headers)
+            if response.status_code == 200:
+                with open(output_filepath, 'wb') as f:
+                    f.write(response.content)
+            else:
+                raise Exception(f"ElevenLabs API error: {response.status_code} - {response.text}")
             logger.info(f"ElevenLabs audio saved to {output_filepath}")
             
             # Autoplay if requested

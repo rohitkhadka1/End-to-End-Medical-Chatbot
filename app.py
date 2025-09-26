@@ -1,7 +1,9 @@
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 from flask import Flask, render_template, request, jsonify, Response, send_file
 from src.error_handler import ChatbotError, format_error_response, ConfigurationError
 from src.helper import get_conversation_chain, format_response, validate_input
-from src.voice_service import get_voice_service
 from embeddings import load_embeddings
 import json
 import logging
@@ -9,6 +11,17 @@ import os
 import tempfile
 from typing import Optional
 from dotenv import load_dotenv
+
+# Import voice service with error handling
+try:
+    from src.voice_service import get_voice_service
+    VOICE_ENABLED = True
+    print("✅ Voice features enabled successfully")
+except Exception as e:
+    print(f"⚠️ Voice service import failed: {e}")
+    VOICE_ENABLED = False
+    def get_voice_service():
+        raise ConfigurationError("Voice service not available")
 
 # Configure logging
 logging.basicConfig(
@@ -134,6 +147,9 @@ def chat():
 @app.route('/voice-input', methods=['POST'])
 def voice_input():
     """Handle voice input: record audio and convert to text."""
+    if not VOICE_ENABLED:
+        return jsonify({'error': 'Voice features not available'}), 503
+    
     try:
         voice_service = get_voice_service()
         
@@ -165,6 +181,9 @@ def voice_input():
 @app.route('/text-to-speech', methods=['POST'])
 def text_to_speech():
     """Convert text to speech and return audio file."""
+    if not VOICE_ENABLED:
+        return jsonify({'error': 'Voice features not available'}), 503
+    
     try:
         voice_service = get_voice_service()
         
@@ -209,6 +228,9 @@ def text_to_speech():
 @app.route('/voice-chat', methods=['POST'])
 def voice_chat():
     """Complete voice chat: voice input -> text processing -> voice output."""
+    if not VOICE_ENABLED:
+        return jsonify({'error': 'Voice features not available'}), 503
+    
     try:
         global vector_store, chain
         voice_service = get_voice_service()
