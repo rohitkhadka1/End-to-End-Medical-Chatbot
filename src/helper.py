@@ -45,7 +45,7 @@ def get_conversation_chain() -> RunnableSequence:
             llm = HuggingFaceEndpoint(
                 repo_id="google/flan-t5-small",  # Start with smaller, more reliable model
                 max_new_tokens=256,
-                temperature=0.7,
+                temperature=0,
                 huggingfacehub_api_token=api_key,
                 timeout=30,  # Shorter timeout
             )
@@ -80,20 +80,22 @@ def get_conversation_chain() -> RunnableSequence:
         logger.info("Successfully initialized Hugging Face language model")
         
         # Create a custom prompt template for mental health conversations
-        template = """You are a helpful and empathetic mental health assistant. Provide supportive guidance while maintaining professional boundaries.
+        template = """You are a compassionate mental health assistant providing evidence-based support. Analyze the user's specific question and provide a tailored, helpful response.
 
-Guidelines:
-- Be compassionate and supportive
-- Provide general information, not diagnoses
-- Suggest professional help when needed
-- Use respectful, inclusive language
-- Keep responses concise and helpful
+IMPORTANT GUIDELINES:
+- Provide specific, actionable advice relevant to the user's exact question
+- Use the context information to give informed responses
+- Be empathetic but professional
+- Suggest professional help for serious concerns
+- Give different responses to different questions - avoid generic answers
+- Keep responses focused and practical
 
-Context from knowledge base: {context}
+Context from knowledge base:
+{context}
 
-User question: {input}
+User's specific question: {input}
 
-Provide a helpful and supportive response:"""
+Based on the user's question and the context provided, give a specific, helpful response that directly addresses their concern:"""
         
         # Create the prompt template with input validation
         try:
@@ -146,6 +148,92 @@ Provide a helpful and supportive response:"""
 
 import json
 import time
+import re
+
+def generate_fallback_response(user_input: str, context: str) -> str:
+    """
+    Generate a contextually appropriate fallback response based on user input and available context.
+    
+    Args:
+        user_input (str): The user's original question/message
+        context (str): Available context from similar documents
+        
+    Returns:
+        str: A contextually appropriate response
+    """
+    user_input_lower = user_input.lower()
+    
+    # Detect key mental health topics and provide appropriate responses
+    if any(word in user_input_lower for word in ['anxiety', 'anxious', 'panic', 'worry', 'worried']):
+        if 'attack' in user_input_lower:
+            return """When experiencing anxiety attacks, try these techniques:
+1. Practice deep breathing - breathe in slowly for 4 counts, hold for 4, exhale for 6
+2. Use grounding techniques - name 5 things you can see, 4 you can hear, 3 you can touch
+3. Remind yourself that panic attacks are temporary and will pass
+4. Find a quiet, safe space if possible
+5. Consider speaking with a mental health professional for personalized coping strategies
+
+If you experience frequent or severe anxiety attacks, please consult with a healthcare provider."""
+        else:
+            return """I understand you're dealing with anxiety. Here are some general strategies that may help:
+- Practice mindfulness and deep breathing exercises
+- Maintain a regular sleep schedule and exercise routine  
+- Limit caffeine and alcohol intake
+- Consider talking to a mental health professional
+- Try relaxation techniques like progressive muscle relaxation
+
+Remember, professional support can provide you with personalized strategies for managing anxiety."""
+    
+    elif any(word in user_input_lower for word in ['depression', 'depressed', 'sad', 'down', 'hopeless']):
+        return """I understand you're experiencing difficult feelings. Depression is a common but serious condition that affects many people. Here are some supportive steps:
+
+- Reach out to trusted friends, family, or a mental health professional
+- Try to maintain daily routines and engage in activities you usually enjoy
+- Consider gentle exercise, even just a short walk
+- Practice self-compassion and avoid self-criticism
+- If you're having thoughts of self-harm, please contact a crisis helpline immediately
+
+Professional help from a therapist or counselor can provide you with effective treatment options. You don't have to go through this alone."""
+    
+    elif any(word in user_input_lower for word in ['stress', 'stressed', 'overwhelmed', 'pressure']):
+        return """Feeling stressed or overwhelmed is a common experience. Here are some strategies that might help:
+
+- Break large tasks into smaller, manageable steps
+- Practice time management and prioritization
+- Take regular breaks and practice relaxation techniques
+- Engage in physical activity to help reduce stress
+- Talk to someone you trust about what you're experiencing
+- Consider stress management techniques like meditation or yoga
+
+If stress is significantly impacting your daily life, a mental health professional can help you develop personalized coping strategies."""
+    
+    elif any(word in user_input_lower for word in ['sleep', 'insomnia', 'tired', 'exhausted']):
+        return """Sleep issues can significantly impact mental health. Here are some tips for better sleep:
+
+- Maintain a consistent sleep schedule
+- Create a relaxing bedtime routine
+- Limit screen time before bed
+- Keep your bedroom cool, dark, and quiet
+- Avoid caffeine and large meals close to bedtime
+- Consider relaxation techniques before sleep
+
+If sleep problems persist, consult with a healthcare provider as they may be related to underlying mental health conditions."""
+    
+    # Use context if available and no specific topic detected
+    elif context and "No specific context available" not in context:
+        return f"""Based on the information available, I want to provide you with supportive guidance. While I can offer general mental health information, it's important to remember that everyone's situation is unique.
+
+I encourage you to speak with a qualified mental health professional who can provide personalized support and treatment options tailored to your specific needs. They can offer evidence-based treatments and ongoing support.
+
+In the meantime, please know that seeking help is a sign of strength, and there are people and resources available to support you."""
+    
+    # General fallback
+    else:
+        return """I'm here to provide mental health support and information. While I'd like to give you more specific guidance, I want to ensure you receive the most appropriate help for your situation.
+
+I encourage you to reach out to a qualified mental health professional who can provide personalized support. They can offer proper assessment, treatment options, and ongoing care tailored to your needs.
+
+If you're in crisis or having thoughts of self-harm, please contact a crisis helpline or emergency services immediately. You don't have to face this alone."""
 
 def format_response(similar_docs, user_input, chain) -> Generator:
     """
@@ -170,17 +258,26 @@ def format_response(similar_docs, user_input, chain) -> Generator:
         
         # Extract relevant context from similar documents
         logger.info(f"Processing {len(similar_docs)} similar documents")
+        print(f"\n=== RETRIEVED DOCUMENTS DEBUG INFO ===")
+        print(f"Number of similar documents found: {len(similar_docs)}")
         
         if similar_docs:
             context_parts = []
             for i, doc in enumerate(similar_docs[:3]):
+                doc_preview = doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
                 logger.debug(f"Document {i+1}: {doc.page_content[:100]}...")
+                print(f"\nDocument {i+1}:")
+                print(f"Content preview: {doc_preview}")
+                print(f"Full length: {len(doc.page_content)} characters")
                 context_parts.append(doc.page_content)
             context = "\n".join(context_parts)
             logger.info(f"Generated context from {len(context_parts)} documents (total length: {len(context)})")
+            print(f"\nCombined context length: {len(context)} characters")
         else:
             context = "No specific context available. Provide general mental health support."
             logger.warning("No similar documents found - using fallback context")
+            print("\nNo similar documents found - using fallback context")
+        print(f"=== END DEBUG INFO ===\n")
         
         # Start the response stream
         yield "data: " + json.dumps({"status": "start"}) + "\n\n"
@@ -192,21 +289,33 @@ def format_response(similar_docs, user_input, chain) -> Generator:
             
             # Try to invoke the chain with detailed error handling
             try:
+                print(f"\n=== INVOKING LLM CHAIN ===")
+                print(f"Input: {user_input}")
+                print(f"Context length: {len(context)} chars")
+                
                 result = chain.invoke({
                     "context": context,
                     "input": user_input
                 })
                 logger.info(f"Chain invocation successful. Result type: {type(result)}")
                 logger.debug(f"Raw result: {result}")
+                print(f"LLM Response received successfully")
+                print(f"Response type: {type(result)}")
+                print(f"=== END LLM CHAIN ===\n")
                 
             except Exception as invoke_error:
                 logger.error(f"Chain invocation failed: {str(invoke_error)}")
                 logger.error(f"Error type: {type(invoke_error).__name__}")
+                print(f"\n=== CHAIN INVOCATION ERROR ===")
+                print(f"Error: {str(invoke_error)}")
+                print(f"Error type: {type(invoke_error).__name__}")
+                print(f"=== END ERROR INFO ===\n")
                 
-                # Fallback response
-                response = f"I understand you're feeling depressed. That's a difficult experience, and I want you to know that you're not alone. Depression is a common mental health condition that affects many people. It's important to reach out for professional help from a mental health provider who can offer proper support and treatment options. In the meantime, please consider talking to someone you trust about how you're feeling."
+                # Generate a more appropriate fallback response based on user input
+                response = generate_fallback_response(user_input, context)
                 
                 logger.info("Using fallback response due to chain invocation failure")
+                print(f"Using fallback response: {response[:100]}...")
                 
                 # Send fallback response
                 words = response.split()
@@ -225,11 +334,16 @@ def format_response(similar_docs, user_input, chain) -> Generator:
                 response = str(result)
             
             logger.info(f"Generated response: {response[:100]}...")
+            print(f"\n=== FINAL RESPONSE ===")
+            print(f"Response preview: {response[:200]}...")
+            print(f"Full response length: {len(response)} characters")
+            print(f"=== END FINAL RESPONSE ===\n")
             
             # Validate response
             if not response or response.strip() == "":
                 logger.warning("Empty response generated, using fallback")
-                response = "I understand you're reaching out about mental health concerns. While I'd like to provide specific guidance, I'm experiencing some technical difficulties right now. Please consider speaking with a mental health professional who can provide you with proper support and guidance."
+                print("\nEmpty response generated, creating fallback response")
+                response = generate_fallback_response(user_input, context)
             
             # Send response in chunks to simulate streaming
             words = response.split()
@@ -253,6 +367,7 @@ def format_response(similar_docs, user_input, chain) -> Generator:
         
         # Return error message as a server-sent event
         error_msg = "I apologize, but I'm having trouble processing your request right now. Please try again in a moment."
+        print(f"\nError in format_response setup: {str(e)}")
         yield "data: " + json.dumps({"status": "error", "message": error_msg}) + "\n\n"
 
 def validate_input(user_input: str) -> tuple[bool, str]:
