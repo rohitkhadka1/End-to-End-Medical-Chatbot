@@ -145,7 +145,8 @@ class VoiceService:
             # Use direct API approach (most reliable)
             import requests
             
-            voice_id = voice if isinstance(voice, str) else "21m00Tcm4TlvDq8ikWAM"  # Rachel voice
+            # Use a valid voice ID - Rachel is a default voice that should be available
+            voice_id = "21m00Tcm4TlvDq8ikWAM" if voice == "Aria" else (voice if isinstance(voice, str) else "21m00Tcm4TlvDq8ikWAM")
             
             url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
             headers = {
