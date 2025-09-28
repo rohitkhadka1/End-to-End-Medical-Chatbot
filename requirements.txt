@@ -4,14 +4,14 @@ transformers==4.41.2
 torch>=2.0.0
 langchain>=0.2.16,<0.3.0
 langchain-community>=0.2.16,<0.3.0
-langchain-pinecone>=0.1.1,<0.2.0  # Updated for better Pydantic v2 compatibility
+langchain-pinecone>=0.2.3
 langchain-huggingface==0.0.3
 flask==3.0.3
 pypdf==4.3.1
 python-dotenv==1.0.1
-pinecone-client>=3.2.2,<4.0.0
+pinecone-client>=3.2.2,<5.0.0
 tenacity==8.5.0
-numpy==1.24.4
+numpy>=1.24.4,<2.0.0
 pydantic>=2.8.2,<3.0.0
 
 # Production dependencies
@@ -28,3 +28,8 @@ pydub==0.25.1
 pyaudio==0.2.14
 groq==0.11.0
 openai==1.56.0
+
+# Development dependencies (optional)
+pytest==7.4.3
+black==23.11.0
+flake8==6.1.0
